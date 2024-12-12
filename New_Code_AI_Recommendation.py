@@ -1,15 +1,18 @@
+import matplotlib.pyplot as plt
+import seaborn as sns
 import pandas as pd
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.neighbors import NearestNeighbors
-from surprise import SVD, Dataset, Reader
 import joblib
 import numpy as np
-from textblob import TextBlob
+
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.model_selection import train_test_split
+from sklearn.neighbors import NearestNeighbors
 from pythainlp.tokenize import word_tokenize
-import matplotlib.pyplot as plt
 from sklearn.metrics import confusion_matrix
-import seaborn as sns
+from surprise import SVD, Dataset, Reader
 from sqlalchemy import create_engine
+from textblob import TextBlob
 
 def load_data_from_db():
     """โหลดข้อมูลจากฐานข้อมูล MySQL และส่งคืนเป็น DataFrame"""
@@ -72,8 +75,41 @@ def analyze_comments(comments):
             sentiment_scores.append(0)  # หากเกิดข้อผิดพลาด ให้คะแนนเป็น 0
     return sentiment_scores
 
+def create_content_based_model(data, text_column='Content', comment_column='Comments', engagement_column='PostEngagement'):
+    """สร้างโมเดล Content-Based Filtering ด้วย TF-IDF และ KNN พร้อมแบ่งข้อมูล"""
+    required_columns = [text_column, comment_column, engagement_column]
+    if not all(col in data.columns for col in required_columns):
+        raise ValueError(f"ข้อมูลขาดคอลัมน์ที่จำเป็น: {set(required_columns) - set(data.columns)}")
+
+    # แบ่งข้อมูลเป็น train และ test
+    train_data, test_data = train_test_split(data, test_size=0.75, random_state=30)
+
+    # ใช้ TF-IDF เพื่อแปลงเนื้อหาของโพสต์เป็นเวกเตอร์
+    tfidf = TfidfVectorizer(stop_words='english', max_features=6000, ngram_range=(1, 3), min_df=1, max_df=0.8)
+    tfidf_matrix = tfidf.fit_transform(train_data[text_column].fillna(''))
+
+    # ใช้ KNN เพื่อหาความคล้ายคลึงระหว่างโพสต์
+    knn = NearestNeighbors(n_neighbors=30, metric='cosine')
+    knn.fit(tfidf_matrix)
+
+    # วิเคราะห์ความรู้สึกจากความคิดเห็นใน train และ test sets
+    train_data['SentimentScore'] = analyze_comments(train_data[comment_column])
+    test_data['SentimentScore'] = analyze_comments(test_data[comment_column])
+
+    # ปรับ Engagement ใน train set
+    train_data = normalize_engagement(train_data)
+    train_data['NormalizedEngagement'] = normalize_scores(train_data[engagement_column])
+    train_data['WeightedEngagement'] = train_data['NormalizedEngagement'] + train_data['SentimentScore']
+
+    # ปรับ Engagement ใน test set (กรณีใช้ในการประเมิน)
+    test_data = normalize_engagement(test_data)
+
+    joblib.dump(tfidf, 'TFIDF_Model.pkl')
+    joblib.dump(knn, 'KNN_Model.pkl')
+    return tfidf, knn, train_data, test_data
+
 def create_collaborative_model(data, n_factors=150, n_epochs=70, lr_all=0.008, reg_all=0.1):
-    """สร้างและฝึกโมเดล Collaborative Filtering"""
+    """สร้างและฝึกโมเดล Collaborative Filtering พร้อมแบ่งข้อมูลเป็น training และ test set"""
     required_columns = ['user_id', 'post_id']
     if not all(col in data.columns for col in required_columns):
         raise ValueError(f"ข้อมูลขาดคอลัมน์ที่จำเป็น: {set(required_columns) - set(data.columns)}")
@@ -81,52 +117,65 @@ def create_collaborative_model(data, n_factors=150, n_epochs=70, lr_all=0.008, r
     melted_data = data.melt(id_vars=['user_id', 'post_id'], var_name='category', value_name='score')
     melted_data = melted_data[melted_data['score'] > 0]
 
-    reader = Reader(rating_scale=(melted_data['score'].min(), melted_data['score'].max()))
-    interaction_data = Dataset.load_from_df(melted_data[['user_id', 'post_id', 'score']], reader)
+    train_data, test_data = train_test_split(melted_data, test_size=0.2, random_state=42)
 
-    trainset = interaction_data.build_full_trainset()
+    reader = Reader(rating_scale=(melted_data['score'].min(), melted_data['score'].max()))
+    trainset = Dataset.load_from_df(train_data[['user_id', 'post_id', 'score']], reader).build_full_trainset()
+
     model = SVD(n_factors=n_factors, n_epochs=n_epochs, lr_all=lr_all, reg_all=reg_all)
     model.fit(trainset)
 
     joblib.dump(model, 'Collaborative_Model.pkl')
-    return model
+    return model, test_data
 
-def create_content_based_model(data, text_column='Content', comment_column='Comments', engagement_column='PostEngagement'):
-    """สร้างโมเดล Content-Based Filtering ด้วย TF-IDF และ KNN"""
-    required_columns = [text_column, comment_column, engagement_column]
-    if not all(col in data.columns for col in required_columns):
-        raise ValueError(f"ข้อมูลขาดคอลัมน์ที่จำเป็น: {set(required_columns) - set(data.columns)}")
+def calculate_pearson_similarity(ratings_a, ratings_b):
+    """คำนวณ Pearson Correlation Similarity ระหว่างผู้ใช้สองคน"""
+    common_items = ratings_a.index.intersection(ratings_b.index)
+    if len(common_items) == 0:
+        return 0
 
-    # ใช้ TF-IDF เพื่อแปลงเนื้อหาของโพสต์เป็นเวกเตอร์
-    tfidf = TfidfVectorizer(stop_words='english', max_features=6000, ngram_range=(1, 3), min_df=1, max_df=0.8)
-    tfidf_matrix = tfidf.fit_transform(data[text_column].fillna(''))
+    ratings_a = ratings_a[common_items]
+    ratings_b = ratings_b[common_items]
 
-    # ใช้ KNN เพื่อหาความคล้ายคลึงระหว่างโพสต์
-    knn = NearestNeighbors(n_neighbors=30, metric='cosine')
-    knn.fit(tfidf_matrix)
+    numerator = ((ratings_a - ratings_a.mean()) * (ratings_b - ratings_b.mean())).sum()
+    denominator = np.sqrt(((ratings_a - ratings_a.mean())**2).sum() * ((ratings_b - ratings_b.mean())**2).sum())
+    return numerator / denominator if denominator != 0 else 0
 
-    # วิเคราะห์ความรู้สึกจากความคิดเห็น
-    data['SentimentScore'] = analyze_comments(data[comment_column])
-    data = normalize_engagement(data)
+def predict_with_pearson(user_ratings, neighbors, item_id):
+    """ทำนายคะแนนสำหรับไอเท็มที่กำหนดโดยใช้ Pearson Similarity"""
+    numerator = sum((neighbor_ratings[item_id] - neighbor_ratings.mean()) * similarity 
+                    for neighbor_ratings, similarity in neighbors)
+    denominator = sum(abs(similarity) for _, similarity in neighbors)
+    return user_ratings.mean() + (numerator / denominator if denominator != 0 else 0)
 
-    # คำนวณคะแนนการมีส่วนร่วมที่ปรับแล้ว (ใช้การบวกคะแนน Sentiment)
-    data['NormalizedEngagement'] = normalize_scores(data[engagement_column])  # Normalize Engagement ให้อยู่ในช่วง [0, 1]
-    data['WeightedEngagement'] = data['NormalizedEngagement'] + data['SentimentScore']  # บวกค่า Engagement กับ Sentiment Score
+def calculate_cosine_similarity(vector_a, vector_b):
+    """คำนวณ Cosine Similarity ระหว่างเวกเตอร์สองตัว"""
+    similarity = cosine_similarity([vector_a], [vector_b])[0][0]
+    return similarity
 
-    joblib.dump(tfidf, 'TFIDF_Model.pkl')
-    joblib.dump(knn, 'KNN_Model.pkl')
-    return tfidf, knn, data
+def evaluate_relevant_items(data, engagement_threshold=0.5, sentiment_threshold=0):
+    """กำหนดเกณฑ์ที่สมดุลมากขึ้นสำหรับ Relevant Items"""
+    data['WeightedEngagement'] = data['PostEngagement'] + data['SentimentScore']
 
-def recommend_hybrid(user_id, data, collaborative_model, knn, categories, tfidf, alpha=0.50):
-    """แนะนำโพสต์โดยใช้ Hybrid Filtering รวม Collaborative และ Content-Based โดยคำนึงถึงหมวดหมู่"""
+    # กำหนด relevant items โดยให้ PostEngagement และ SentimentScore มีความสำคัญ
+    relevant_items = data[
+        (data['PostEngagement'] > engagement_threshold) &
+        (data['SentimentScore'] >= sentiment_threshold) &
+        (data['WeightedEngagement'] > engagement_threshold)  # เพิ่ม Weight Factor
+    ]['post_id'].tolist()
+
+    return relevant_items
+
+def recommend_hybrid(user_id, train_data, test_data, collaborative_model, knn, categories, tfidf, alpha=0.50):
+    """แนะนำโพสต์โดยใช้ Hybrid Filtering รวม Collaborative และ Content-Based โดยคำนึงถึง test set"""
     if not (0 <= alpha <= 1):
         raise ValueError("Alpha ต้องอยู่ในช่วง 0 ถึง 1")
 
-    # ขั้นแรก: หาข้อมูลโพสต์ที่ผู้ใช้เคยโต้ตอบแล้ว
-    interacted_posts = data[data['owner_id'] == user_id]['post_id'].tolist()
+    # ขั้นแรก: หาข้อมูลโพสต์ที่ผู้ใช้เคยโต้ตอบแล้วใน train set
+    interacted_posts = train_data[train_data['owner_id'] == user_id]['post_id'].tolist()
 
-    # ข้อมูลโพสต์ที่ยังไม่ได้ดู
-    unviewed_data = data[~data['post_id'].isin(interacted_posts)]
+    # ข้อมูลโพสต์ที่ยังไม่ได้ดูใน test set
+    unviewed_data = test_data[~test_data['post_id'].isin(interacted_posts)]
 
     recommendations = []
 
@@ -143,19 +192,19 @@ def recommend_hybrid(user_id, data, collaborative_model, knn, categories, tfidf,
             collab_score = collaborative_model.predict(user_id, post['post_id']).est
 
             # Content-Based Filtering: คำนวณคะแนนจากความคล้ายคลึงของเนื้อหา
-            idx = data.index[data['post_id'] == post['post_id']].tolist()
+            idx = train_data.index[train_data['post_id'] == post['post_id']].tolist()
             content_score = 0
             if idx:
                 idx = idx[0]
                 # แปลงเนื้อหาของโพสต์เป็นเวกเตอร์ TF-IDF
-                tfidf_vector = tfidf.transform([data.iloc[idx]['Content']])
+                tfidf_vector = tfidf.transform([train_data.iloc[idx]['Content']])
                 
                 # ใช้ KNN เพื่อหาความคล้ายคลึงของโพสต์
-                n_neighbors = min(30, knn._fit_X.shape[0])  # ใช้ shape[0] แทน len()
-                distances, indices = knn.kneighbors(tfidf_vector, n_neighbors=n_neighbors)  # หาความคล้ายของโพสต์
+                n_neighbors = min(30, knn._fit_X.shape[0])
+                distances, indices = knn.kneighbors(tfidf_vector, n_neighbors=n_neighbors)
                 
                 # คำนวณคะแนนจากโพสต์ที่คล้ายกัน
-                content_score = np.mean([data.iloc[i]['NormalizedEngagement'] for i in indices[0]])
+                content_score = np.mean([train_data.iloc[i]['NormalizedEngagement'] for i in indices[0]])
 
             # ผสมคะแนนจาก Collaborative และ Content-Based ตามค่า alpha
             final_score = alpha * collab_score + (1 - alpha) * content_score
@@ -168,11 +217,9 @@ def recommend_hybrid(user_id, data, collaborative_model, knn, categories, tfidf,
 
     return recommendations
 
-
-
 def evaluate_model(data, recommendations, threshold=0.5):
     """ประเมินผลโมเดลด้วย Precision, Recall, F1-Score และ Accuracy"""
-    relevant_items = data[(data['PostEngagement'] > threshold) & (data['SentimentScore'] > -1)]['post_id'].tolist()
+    relevant_items = evaluate_relevant_items(data, engagement_threshold=threshold)
     recommended_items = recommendations
 
     tp = set(recommended_items) & set(relevant_items)
@@ -188,7 +235,6 @@ def evaluate_model(data, recommendations, threshold=0.5):
     accuracy = len(tp) / len(recommended_items) if len(recommended_items) > 0 else 0
 
     return precision, recall, f1, accuracy, list(tp), list(fp), list(fn)
-
 
 def plot_evaluation_results(results):
     """วาดกราฟผลการประเมิน Precision, Recall, F1 และ Accuracy"""
@@ -213,7 +259,6 @@ def plot_evaluation_results(results):
     plt.show()
     print("กราฟผลการประเมินถูกบันทึกใน 'evaluation_metrics.png'")
 
-
 def plot_confusion_matrix(tp, fp, fn):
     """วาดกราฟ Confusion Matrix"""
     cm = np.array([[len(tp), len(fp)], [len(fn), len(tp)]])
@@ -235,10 +280,10 @@ def main():
         return
 
     # สร้างโมเดล Collaborative Filtering
-    collaborative_model = create_collaborative_model(collaborative_data)
+    collaborative_model, collaborative_test_data = create_collaborative_model(collaborative_data)
 
     # สร้างโมเดล Content-Based Filtering
-    tfidf, knn, enriched_content_data = create_content_based_model(content_based_data)
+    tfidf, knn, content_train_data, content_test_data = create_content_based_model(content_based_data)
 
     # หมวดหมู่ตัวอย่าง
     categories = [
@@ -248,18 +293,32 @@ def main():
         'Desktop_Computer', 'Projector'
     ]
 
-    user_ids = enriched_content_data['owner_id'].unique()
+    # เลือก user_id จากข้อมูลที่มีใน train set
+    user_ids = content_train_data['owner_id'].unique()
+    if len(user_ids) == 0:
+        print("ไม่มีข้อมูล user_id สำหรับการทดสอบ")
+        return
+
     results = []
     all_tp, all_fp, all_fn = [], [], []
 
-    for _ in range(5):  # รันซ้ำ 5 รอบเพื่อความเสถียร
-        for user_id in user_ids:
-            recommendations = recommend_hybrid(user_id, enriched_content_data, collaborative_model, knn, categories, tfidf, alpha=0.5)
-            precision, recall, f1, accuracy, tp, fp, fn = evaluate_model(enriched_content_data, recommendations)
-            results.append((precision, recall, f1, accuracy))
-            all_tp.extend(tp)
-            all_fp.extend(fp)
-            all_fn.extend(fn)
+    # รันการแนะนำและประเมินผล
+    for user_id in user_ids:
+        recommendations = recommend_hybrid(
+            user_id,
+            content_train_data,
+            content_test_data,
+            collaborative_model,
+            knn,
+            categories,
+            tfidf,
+            alpha=0.5
+        )
+        precision, recall, f1, accuracy, tp, fp, fn = evaluate_model(content_test_data, recommendations)
+        results.append((precision, recall, f1, accuracy))
+        all_tp.extend(tp)
+        all_fp.extend(fp)
+        all_fn.extend(fn)
 
     # คำนวณค่าเฉลี่ยของผลการประเมิน
     avg_precision = np.mean([r[0] for r in results])
@@ -267,7 +326,7 @@ def main():
     avg_f1 = np.mean([r[2] for r in results])
     avg_accuracy = np.mean([r[3] for r in results])  # ค่าเฉลี่ย Accuracy
 
-    print("ผลการประเมินเฉลี่ยหลังจาก 5 รอบ:")
+    print("ผลการประเมินเฉลี่ยหลังจากการทดสอบ:")
     print(f"Precision: {avg_precision:.2f}")
     print(f"Recall: {avg_recall:.2f}")
     print(f"F1 Score: {avg_f1:.2f}")
@@ -277,16 +336,5 @@ def main():
     plot_evaluation_results(results)
     plot_confusion_matrix(all_tp, all_fp, all_fn)
 
-    # บันทึกผลการประเมินลงไฟล์ CSV
-    results_df = pd.DataFrame(results, columns=['Precision', 'Recall', 'F1', 'Accuracy'])  # เพิ่ม Accuracy
-    results_df.to_csv('evaluation_results.csv', index=False)
-    print("ผลการประเมินถูกบันทึกใน 'evaluation_results.csv'")
-
-    # แสดงผลการแนะนำสำหรับ user_id 1170001
-    test_user_id = 1170001
-    test_recommendations = recommend_hybrid(test_user_id, enriched_content_data, collaborative_model, knn, categories, tfidf, alpha=0.5)
-    print(f"โพสต์ที่แนะนำสำหรับ user_id {test_user_id}: {test_recommendations[:10]}")
-
 if __name__ == "__main__":
     main()
-
