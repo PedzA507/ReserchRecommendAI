@@ -128,31 +128,6 @@ def create_collaborative_model(data, n_factors=150, n_epochs=70, lr_all=0.005, r
     joblib.dump(model, 'Collaborative_Model.pkl')
     return model, test_data
 
-def calculate_pearson_similarity(ratings_a, ratings_b):
-    """คำนวณ Pearson Correlation Similarity ระหว่างผู้ใช้สองคน"""
-    common_items = ratings_a.index.intersection(ratings_b.index)
-    if len(common_items) == 0:
-        return 0
-
-    ratings_a = ratings_a[common_items]
-    ratings_b = ratings_b[common_items]
-
-    numerator = ((ratings_a - ratings_a.mean()) * (ratings_b - ratings_b.mean())).sum()
-    denominator = np.sqrt(((ratings_a - ratings_a.mean())**2).sum() * ((ratings_b - ratings_b.mean())**2).sum())
-    return numerator / denominator if denominator != 0 else 0
-
-def predict_with_pearson(user_ratings, neighbors, item_id):
-    """ทำนายคะแนนสำหรับไอเท็มที่กำหนดโดยใช้ Pearson Similarity"""
-    numerator = sum((neighbor_ratings[item_id] - neighbor_ratings.mean()) * similarity 
-                    for neighbor_ratings, similarity in neighbors)
-    denominator = sum(abs(similarity) for _, similarity in neighbors)
-    return user_ratings.mean() + (numerator / denominator if denominator != 0 else 0)
-
-def calculate_cosine_similarity(vector_a, vector_b):
-    """คำนวณ Cosine Similarity ระหว่างเวกเตอร์สองตัว"""
-    similarity = cosine_similarity([vector_a], [vector_b])[0][0]
-    return similarity
-
 def recommend_hybrid(user_id, train_data, test_data, collaborative_model, knn, categories, tfidf, alpha=0.50):
     """แนะนำโพสต์โดยใช้ Hybrid Filtering รวม Collaborative และ Content-Based โดยคำนึงถึง test set"""
     if not (0 <= alpha <= 1):
