@@ -89,7 +89,7 @@ def create_content_based_model(data, text_column='Content', comment_column='Comm
     tfidf_matrix = tfidf.fit_transform(train_data[text_column].fillna(''))
 
     # ใช้ KNN เพื่อหาความคล้ายคลึงระหว่างโพสต์
-    knn = NearestNeighbors(n_neighbors=30, metric='cosine')
+    knn = NearestNeighbors(n_neighbors=10, metric='cosine')
     knn.fit(tfidf_matrix)
 
     # วิเคราะห์ความรู้สึกจากความคิดเห็นใน train และ test sets
@@ -108,7 +108,7 @@ def create_content_based_model(data, text_column='Content', comment_column='Comm
     joblib.dump(knn, 'KNN_Model.pkl')
     return tfidf, knn, train_data, test_data
 
-def create_collaborative_model(data, n_factors=150, n_epochs=70, lr_all=0.008, reg_all=0.1):
+def create_collaborative_model(data, n_factors=150, n_epochs=70, lr_all=0.005, reg_all=0.5):
     """สร้างและฝึกโมเดล Collaborative Filtering พร้อมแบ่งข้อมูลเป็น training และ test set"""
     required_columns = ['user_id', 'post_id']
     if not all(col in data.columns for col in required_columns):
@@ -117,7 +117,7 @@ def create_collaborative_model(data, n_factors=150, n_epochs=70, lr_all=0.008, r
     melted_data = data.melt(id_vars=['user_id', 'post_id'], var_name='category', value_name='score')
     melted_data = melted_data[melted_data['score'] > 0]
 
-    train_data, test_data = train_test_split(melted_data, test_size=0.2, random_state=42)
+    train_data, test_data = train_test_split(melted_data, test_size=0.25, random_state=42)
 
     reader = Reader(rating_scale=(melted_data['score'].min(), melted_data['score'].max()))
     trainset = Dataset.load_from_df(train_data[['user_id', 'post_id', 'score']], reader).build_full_trainset()
@@ -153,19 +153,6 @@ def calculate_cosine_similarity(vector_a, vector_b):
     similarity = cosine_similarity([vector_a], [vector_b])[0][0]
     return similarity
 
-def evaluate_relevant_items(data, engagement_threshold=0.5, sentiment_threshold=0):
-    """กำหนดเกณฑ์ที่สมดุลมากขึ้นสำหรับ Relevant Items"""
-    data['WeightedEngagement'] = data['PostEngagement'] + data['SentimentScore']
-
-    # กำหนด relevant items โดยให้ PostEngagement และ SentimentScore มีความสำคัญ
-    relevant_items = data[
-        (data['PostEngagement'] > engagement_threshold) &
-        (data['SentimentScore'] >= sentiment_threshold) &
-        (data['WeightedEngagement'] > engagement_threshold)  # เพิ่ม Weight Factor
-    ]['post_id'].tolist()
-
-    return relevant_items
-
 def recommend_hybrid(user_id, train_data, test_data, collaborative_model, knn, categories, tfidf, alpha=0.50):
     """แนะนำโพสต์โดยใช้ Hybrid Filtering รวม Collaborative และ Content-Based โดยคำนึงถึง test set"""
     if not (0 <= alpha <= 1):
@@ -200,7 +187,7 @@ def recommend_hybrid(user_id, train_data, test_data, collaborative_model, knn, c
                 tfidf_vector = tfidf.transform([train_data.iloc[idx]['Content']])
                 
                 # ใช้ KNN เพื่อหาความคล้ายคลึงของโพสต์
-                n_neighbors = min(30, knn._fit_X.shape[0])
+                n_neighbors = min(20, knn._fit_X.shape[0])
                 distances, indices = knn.kneighbors(tfidf_vector, n_neighbors=n_neighbors)
                 
                 # คำนวณคะแนนจากโพสต์ที่คล้ายกัน
@@ -216,6 +203,19 @@ def recommend_hybrid(user_id, train_data, test_data, collaborative_model, knn, c
     recommendations = recommendations_df.sort_values(by='normalized_score', ascending=False)['post_id'].tolist()
 
     return recommendations
+
+def evaluate_relevant_items(data, engagement_threshold=0.5, sentiment_threshold=0):
+    """กำหนดเกณฑ์ที่สมดุลมากขึ้นสำหรับ Relevant Items"""
+    data['WeightedEngagement'] = data['PostEngagement'] + data['SentimentScore']
+
+    # กำหนด relevant items โดยให้ PostEngagement และ SentimentScore มีความสำคัญ
+    relevant_items = data[
+        (data['PostEngagement'] > engagement_threshold) &
+        (data['SentimentScore'] >= sentiment_threshold) &
+        (data['WeightedEngagement'] > engagement_threshold)  # เพิ่ม Weight Factor
+    ]['post_id'].tolist()
+
+    return relevant_items
 
 def evaluate_model(data, recommendations, threshold=0.5):
     """ประเมินผลโมเดลด้วย Precision, Recall, F1-Score และ Accuracy"""
