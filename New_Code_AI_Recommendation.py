@@ -66,11 +66,12 @@ def analyze_comments(comments):
                 if polarity > 0.5:
                     sentiment_scores.append(1)  # Sentiment บวก
                 elif 0 < polarity <= 0.5:
-                    sentiment_scores.append(1)  # Sentiment บวก
+                    sentiment_scores.append(0.5)  # Sentiment บวก
                 elif -0.5 <= polarity < 0:
-                    sentiment_scores.append(-1)  # Sentiment ลบ
+                    sentiment_scores.append(-0.5)  # Sentiment ลบ
                 else:
                     sentiment_scores.append(-1)  # Sentiment ลบ
+                    
         except Exception as e:
             sentiment_scores.append(0)  # หากเกิดข้อผิดพลาด ให้คะแนนเป็น 0
     return sentiment_scores
@@ -129,6 +130,8 @@ def create_collaborative_model(data, n_factors=150, n_epochs=70, lr_all=0.005, r
     return model, test_data
 
 def recommend_hybrid(user_id, train_data, test_data, collaborative_model, knn, categories, tfidf, alpha=0.50):
+
+    
     """แนะนำโพสต์โดยใช้ Hybrid Filtering รวม Collaborative และ Content-Based โดยคำนึงถึง test set"""
     if not (0 <= alpha <= 1):
         raise ValueError("Alpha ต้องอยู่ในช่วง 0 ถึง 1")
@@ -201,19 +204,16 @@ def evaluate_model(data, recommendations, threshold=0.5):
     fp = set(recommended_items) - tp
     fn = set(relevant_items) - tp
 
-
+    accuracy = len(tp) / len(recommended_items) if len(recommended_items) > 0 else 0
     precision = len(tp) / (len(tp) + len(fp)) if (len(tp) + len(fp)) > 0 else 0
     recall = len(tp) / (len(tp) + len(fn)) if (len(tp) + len(fn)) > 0 else 0
     f1 = (2 * precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
 
-    # คำนวณ Accuracy
-    accuracy = len(tp) / len(recommended_items) if len(recommended_items) > 0 else 0
-
-    return precision, recall, f1, accuracy, list(tp), list(fp), list(fn)
+    return accuracy ,precision, recall, f1, list(tp), list(fp), list(fn)
 
 def plot_evaluation_results(results):
     """วาดกราฟผลการประเมิน Precision, Recall, F1 และ Accuracy"""
-    metrics = ['Precision', 'Recall', 'F1', 'Accuracy']
+    metrics = ['Accuracy', 'Precision', 'Recall', 'F1']
     averages = [
         np.mean([r[0] for r in results]),
         np.mean([r[1] for r in results]),
@@ -289,23 +289,25 @@ def main():
             tfidf,
             alpha=0.5
         )
-        precision, recall, f1, accuracy, tp, fp, fn = evaluate_model(content_test_data, recommendations)
-        results.append((precision, recall, f1, accuracy))
+        accuracy, precision, recall, f1, tp, fp, fn = evaluate_model(content_test_data, recommendations)
+        results.append((accuracy, precision, recall, f1))
         all_tp.extend(tp)
         all_fp.extend(fp)
         all_fn.extend(fn)
 
     # คำนวณค่าเฉลี่ยของผลการประเมิน
-    avg_precision = np.mean([r[0] for r in results])
-    avg_recall = np.mean([r[1] for r in results])
-    avg_f1 = np.mean([r[2] for r in results])
-    avg_accuracy = np.mean([r[3] for r in results])  # ค่าเฉลี่ย Accuracy
+    avg_accuracy = np.mean([r[0] for r in results])  # ค่าเฉลี่ย Accuracy
+    avg_precision = np.mean([r[1] for r in results])
+    avg_recall = np.mean([r[2] for r in results])
+    avg_f1 = np.mean([r[3] for r in results])
+    
 
     print("ผลการประเมินเฉลี่ยหลังจากการทดสอบ:")
+    print(f"Accuracy: {avg_accuracy:.2f}")
     print(f"Precision: {avg_precision:.2f}")
     print(f"Recall: {avg_recall:.2f}")
     print(f"F1 Score: {avg_f1:.2f}")
-    print(f"Accuracy: {avg_accuracy:.2f}")  # แสดง Accuracy
+    
 
     # วาดกราฟผลการประเมิน
     plot_evaluation_results(results)
