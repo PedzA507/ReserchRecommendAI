@@ -82,7 +82,7 @@ def create_content_based_model(data, text_column='Content', comment_column='Comm
         raise ValueError(f"ข้อมูลขาดคอลัมน์ที่จำเป็น: {set(required_columns) - set(data.columns)}")
 
     # แบ่งข้อมูลเป็น train และ test
-    train_data, test_data = train_test_split(data, test_size=0.75, random_state=30)
+    train_data, test_data = train_test_split(data, test_size=0.25, random_state=42)
 
     # ใช้ TF-IDF เพื่อแปลงเนื้อหาของโพสต์เป็นเวกเตอร์
     tfidf = TfidfVectorizer(stop_words='english', max_features=6000, ngram_range=(1, 3), min_df=1, max_df=0.8)
