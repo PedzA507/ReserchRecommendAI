@@ -130,9 +130,9 @@ def create_collaborative_model(data, n_factors=150, n_epochs=70, lr_all=0.005, r
     return model, test_data
 
 def recommend_hybrid(user_id, train_data, test_data, collaborative_model, knn, categories, tfidf, alpha=0.50):
-
-    
-    """แนะนำโพสต์โดยใช้ Hybrid Filtering รวม Collaborative และ Content-Based โดยคำนึงถึง test set"""
+    """
+    แนะนำโพสต์โดยใช้ Hybrid Filtering รวม Collaborative และ Content-Based โดยคำนึงถึง test set
+    """
     if not (0 <= alpha <= 1):
         raise ValueError("Alpha ต้องอยู่ในช่วง 0 ถึง 1")
 
@@ -151,7 +151,7 @@ def recommend_hybrid(user_id, train_data, test_data, collaborative_model, knn, c
         # ถ้าไม่มีโพสต์ในหมวดหมู่นั้น ๆ ให้ข้ามไป
         if category_data.empty:
             continue
-        
+
         for _, post in category_data.iterrows():
             # Collaborative Filtering: คำนวณคะแนนจากโมเดล Collaborative
             collab_score = collaborative_model.predict(user_id, post['post_id']).est
@@ -163,11 +163,11 @@ def recommend_hybrid(user_id, train_data, test_data, collaborative_model, knn, c
                 idx = idx[0]
                 # แปลงเนื้อหาของโพสต์เป็นเวกเตอร์ TF-IDF
                 tfidf_vector = tfidf.transform([train_data.iloc[idx]['Content']])
-                
+
                 # ใช้ KNN เพื่อหาความคล้ายคลึงของโพสต์
                 n_neighbors = min(20, knn._fit_X.shape[0])
                 distances, indices = knn.kneighbors(tfidf_vector, n_neighbors=n_neighbors)
-                
+
                 # คำนวณคะแนนจากโพสต์ที่คล้ายกัน
                 content_score = np.mean([train_data.iloc[i]['NormalizedEngagement'] for i in indices[0]])
 
@@ -181,6 +181,7 @@ def recommend_hybrid(user_id, train_data, test_data, collaborative_model, knn, c
     recommendations = recommendations_df.sort_values(by='normalized_score', ascending=False)['post_id'].tolist()
 
     return recommendations
+
 
 def evaluate_relevant_items(data, engagement_threshold=0.5, sentiment_threshold=0):
     """กำหนดเกณฑ์ที่สมดุลมากขึ้นสำหรับ Relevant Items"""
