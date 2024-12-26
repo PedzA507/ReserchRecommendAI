@@ -5,12 +5,16 @@ import joblib
 import numpy as np
 
 from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics import mean_squared_error, r2_score
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LinearRegression
+from sklearn.preprocessing import StandardScaler
 from sklearn.neighbors import NearestNeighbors
-from pythainlp.tokenize import word_tokenize
 from sklearn.metrics import confusion_matrix
+from pythainlp.tokenize import word_tokenize
 from surprise import SVD, Dataset, Reader
+from sklearn.linear_model import Ridge
 from sqlalchemy import create_engine
 from textblob import TextBlob
 
@@ -83,7 +87,7 @@ def create_content_based_model(data, text_column='Content', comment_column='Comm
         raise ValueError(f"ข้อมูลขาดคอลัมน์ที่จำเป็น: {set(required_columns) - set(data.columns)}")
 
     # แบ่งข้อมูลเป็น train และ test
-    train_data, test_data = train_test_split(data, test_size=0.25, random_state=42)
+    train_data, test_data = train_test_split(data, test_size=0.5, random_state=42)
 
     # ใช้ TF-IDF เพื่อแปลงเนื้อหาของโพสต์เป็นเวกเตอร์
     tfidf = TfidfVectorizer(stop_words='english', max_features=6000, ngram_range=(1, 3), min_df=1, max_df=0.8)
@@ -118,7 +122,7 @@ def create_collaborative_model(data, n_factors=150, n_epochs=70, lr_all=0.005, r
     melted_data = data.melt(id_vars=['user_id', 'post_id'], var_name='category', value_name='score')
     melted_data = melted_data[melted_data['score'] > 0]
 
-    train_data, test_data = train_test_split(melted_data, test_size=0.25, random_state=42)
+    train_data, test_data = train_test_split(melted_data, test_size=0.5, random_state=42)
 
     reader = Reader(rating_scale=(melted_data['score'].min(), melted_data['score'].max()))
     trainset = Dataset.load_from_df(train_data[['user_id', 'post_id', 'score']], reader).build_full_trainset()
@@ -129,26 +133,25 @@ def create_collaborative_model(data, n_factors=150, n_epochs=70, lr_all=0.005, r
     joblib.dump(model, 'Collaborative_Model.pkl')
     return model, test_data
 
-def recommend_hybrid(user_id, train_data, test_data, collaborative_model, knn, categories, tfidf, alpha=0.50):
+def recommend_hybrid(user_id, train_data, test_data, collaborative_model, knn, categories, tfidf):
     """
-    แนะนำโพสต์โดยใช้ Hybrid Filtering รวม Collaborative และ Content-Based โดยคำนึงถึง test set
+    แนะนำโพสต์โดยใช้ Hybrid Filtering โดยผสาน Collaborative Filtering และ Content-Based Filtering
+    ผ่านเทคนิค Feature Fusion และ Meta-Model (Ridge Regression)
     """
-    if not (0 <= alpha <= 1):
-        raise ValueError("Alpha ต้องอยู่ในช่วง 0 ถึง 1")
-
-    # ขั้นแรก: หาข้อมูลโพสต์ที่ผู้ใช้เคยโต้ตอบแล้วใน train set
+    # หาข้อมูลโพสต์ที่ผู้ใช้เคยโต้ตอบแล้วใน train set
     interacted_posts = train_data[train_data['owner_id'] == user_id]['post_id'].tolist()
-
+    
     # ข้อมูลโพสต์ที่ยังไม่ได้ดูใน test set
     unviewed_data = test_data[~test_data['post_id'].isin(interacted_posts)]
-
+    
     recommendations = []
+    meta_features = []  # เก็บ Feature จาก CF และ CBF
+    post_ids = []  # เก็บ post_id สำหรับการแนะนำ
+    target_scores = []  # เก็บ Engagement Score สำหรับเทรน Ridge Regression
 
-    # ขั้นที่สอง: ใช้หมวดหมู่ในการเลือกโพสต์ที่แนะนำ
+    # ใช้หมวดหมู่ในการเลือกโพสต์ที่แนะนำ
     for category in categories:
         category_data = unviewed_data[unviewed_data[category] == 1]
-
-        # ถ้าไม่มีโพสต์ในหมวดหมู่นั้น ๆ ให้ข้ามไป
         if category_data.empty:
             continue
 
@@ -159,29 +162,44 @@ def recommend_hybrid(user_id, train_data, test_data, collaborative_model, knn, c
             # Content-Based Filtering: คำนวณคะแนนจากความคล้ายคลึงของเนื้อหา
             idx = train_data.index[train_data['post_id'] == post['post_id']].tolist()
             content_score = 0
+
             if idx:
                 idx = idx[0]
                 # แปลงเนื้อหาของโพสต์เป็นเวกเตอร์ TF-IDF
                 tfidf_vector = tfidf.transform([train_data.iloc[idx]['Content']])
-
-                # ใช้ KNN เพื่อหาความคล้ายคลึงของโพสต์
-                n_neighbors = min(20, knn._fit_X.shape[0])
+                n_neighbors = min(5, knn._fit_X.shape[0])
                 distances, indices = knn.kneighbors(tfidf_vector, n_neighbors=n_neighbors)
-
-                # คำนวณคะแนนจากโพสต์ที่คล้ายกัน
                 content_score = np.mean([train_data.iloc[i]['NormalizedEngagement'] for i in indices[0]])
+                engagement_score = train_data.iloc[idx]['PostEngagement'] if 'PostEngagement' in train_data.columns else 0
+            else:
+                engagement_score = 0
 
-            # ผสมคะแนนจาก Collaborative และ Content-Based ตามค่า alpha
-            final_score = alpha * collab_score + (1 - alpha) * content_score
-            recommendations.append((post['post_id'], final_score))
+            # เก็บ Meta Feature
+            meta_features.append([collab_score, content_score])
+            post_ids.append(post['post_id'])
+            target_scores.append(engagement_score)
 
-    # จัดเรียงโพสต์ตามคะแนนที่ได้และคำนวณคะแนนที่เป็น normalized score
-    recommendations_df = pd.DataFrame(recommendations, columns=['post_id', 'score'])
-    recommendations_df['normalized_score'] = normalize_scores(recommendations_df['score'])
-    recommendations = recommendations_df.sort_values(by='normalized_score', ascending=False)['post_id'].tolist()
+    # ฝึก Meta-Model (Ridge Regression)
+    if meta_features and target_scores:
+        meta_model = Ridge(alpha=1.0)  # Regularization เพื่อลด Overfitting
+        scaler = StandardScaler()
+        
+        # Normalize Meta Features
+        meta_features = scaler.fit_transform(meta_features)
+        target_scores = np.array(target_scores).reshape(-1, 1)
+
+        # ฝึก Ridge Regression
+        meta_model.fit(meta_features, target_scores)
+
+        # คำนวณคะแนนจาก Meta-Model
+        final_scores = meta_model.predict(meta_features)
+
+        # จัดเรียงโพสต์ตาม Final Score
+        recommendations = list(zip(post_ids, final_scores.flatten()))
+        recommendations = sorted(recommendations, key=lambda x: x[1], reverse=True)
+        recommendations = [post_id for post_id, _ in recommendations]
 
     return recommendations
-
 
 def evaluate_relevant_items(data, engagement_threshold=0.5, sentiment_threshold=0):
     """กำหนดเกณฑ์ที่สมดุลมากขึ้นสำหรับ Relevant Items"""
@@ -287,8 +305,7 @@ def main():
             collaborative_model,
             knn,
             categories,
-            tfidf,
-            alpha=0.5
+            tfidf
         )
         accuracy, precision, recall, f1, tp, fp, fn = evaluate_model(content_test_data, recommendations)
         results.append((accuracy, precision, recall, f1))
